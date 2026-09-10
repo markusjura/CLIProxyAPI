@@ -1,0 +1,46 @@
+name: Build patched CLIProxyAPI
+on:
+  pull_request:
+    paths:
+      - ".fork/**"
+      - ".github/workflows/fork-update.yml"
+  schedule:
+    - cron: '19 6 * * *'
+  workflow_dispatch:
+    inputs:
+      upstream:
+        description: 'Exact upstream tag, or latest'
+        default: latest
+        required: true
+        type: string
+permissions:
+  contents: write
+concurrency:
+  group: fork-update-${{ github.event.pull_request.number || 'release' }}
+  cancel-in-progress: false
+jobs:
+  release:
+    if: github.repository == 'markusjura/CLIProxyAPI' && github.event_name != 'pull_request'
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Test, build, and publish patched release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM: ${{ inputs.upstream || 'latest' }}
+        run: python3 .fork/update.py --upstream "$UPSTREAM" --output "$RUNNER_TEMP/patched-release" --publish
+  test:
+    if: github.repository == 'markusjura/CLIProxyAPI' && github.event_name == 'pull_request'
+    permissions:
+      contents: read
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Validate patch queue and build
+        run: python3 .fork/update.py --output "$RUNNER_TEMP/patched-test"
