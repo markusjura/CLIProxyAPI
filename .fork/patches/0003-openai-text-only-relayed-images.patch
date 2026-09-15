@@ -1,0 +1,85 @@
+diff --git a/internal/runtime/executor/helps/openai_compat_tool_results.go b/internal/runtime/executor/helps/openai_compat_tool_results.go
+index d62591e..c5c737a 100644
+--- a/internal/runtime/executor/helps/openai_compat_tool_results.go
++++ b/internal/runtime/executor/helps/openai_compat_tool_results.go
+@@ -28,6 +28,7 @@ func ShouldNormalizeOpenAIToolResultsForModel(compat *config.OpenAICompatibility
+ 
+ // NormalizeOpenAIToolResultsTextOnly converts tool message content to strings.
+ // Text parts are preserved and image parts are replaced with a short marker.
++// Also replace images in user messages, where translators relay tool images.
+ func NormalizeOpenAIToolResultsTextOnly(payload []byte) []byte {
+ 	messages := gjson.GetBytes(payload, "messages")
+ 	if !messages.Exists() || !messages.IsArray() {
+@@ -46,6 +47,17 @@ func NormalizeOpenAIToolResultsTextOnly(payload []byte) []byte {
+ 				}
+ 			}
+ 		}
++		if message.Get("role").String() == "user" && message.Get("content").IsArray() {
++			for partIndex, part := range message.Get("content").Array() {
++				if isOpenAIImageToolResultPart(part) {
++					path := fmt.Sprintf("messages.%d.content.%d", messageIndex, partIndex)
++					replacement := map[string]string{"type": "text", "text": openAIToolResultImageOmittedText}
++					if updated, errSet := sjson.SetBytes(out, path, replacement); errSet == nil {
++						out = updated
++					}
++				}
++			}
++		}
+ 		messageIndex++
+ 		return true
+ 	})
+diff --git a/internal/runtime/executor/openai_compat_executor_tool_results_test.go b/internal/runtime/executor/openai_compat_executor_tool_results_test.go
+index 7ab0e21..b014acb 100644
+--- a/internal/runtime/executor/openai_compat_executor_tool_results_test.go
++++ b/internal/runtime/executor/openai_compat_executor_tool_results_test.go
+@@ -19,12 +19,14 @@ func TestOpenAICompatExecutorToolResultContentByInputModalities(t *testing.T) {
+ 		name            string
+ 		stream          bool
+ 		inputModalities []string
+-		wantString      bool
++		wantTextOnly    bool
+ 	}{
+-		{name: "non-stream text-only", stream: false, inputModalities: []string{"text"}, wantString: true},
+-		{name: "stream text-only", stream: true, inputModalities: []string{"text"}, wantString: true},
+-		{name: "non-stream multimodal", stream: false, inputModalities: []string{"text", "image"}, wantString: false},
+-		{name: "non-stream unspecified", stream: false, inputModalities: nil, wantString: false},
++		{name: "non-stream text-only", stream: false, inputModalities: []string{"text"}, wantTextOnly: true},
++		{name: "stream text-only", stream: true, inputModalities: []string{"text"}, wantTextOnly: true},
++		{name: "non-stream multimodal", stream: false, inputModalities: []string{"text", "image"}, wantTextOnly: false},
++		{name: "non-stream unspecified", stream: false, inputModalities: nil, wantTextOnly: false},
++		{name: "stream multimodal", stream: true, inputModalities: []string{"text", "image"}, wantTextOnly: false},
++		{name: "stream unspecified", stream: true, inputModalities: nil, wantTextOnly: false},
+ 	}
+ 
+ 	for _, tt := range tests {
+@@ -83,17 +85,20 @@ func TestOpenAICompatExecutorToolResultContentByInputModalities(t *testing.T) {
+ 				t.Fatalf("Execute error: %v", errExecute)
+ 			}
+ 
+-			toolContent := gjson.GetBytes(gotBody, "messages.1.content")
+-			if tt.wantString {
+-				if toolContent.Type != gjson.String {
+-					t.Fatalf("tool content type = %s, want string; body=%s", toolContent.Type, string(gotBody))
+-				}
+-				want := "image inspected\n\n[image omitted: unsupported by upstream]"
+-				if toolContent.String() != want {
+-					t.Fatalf("tool content = %q, want %q", toolContent.String(), want)
++			if got := gjson.GetBytes(gotBody, "messages.1.content"); got.Type != gjson.String || got.String() != "image inspected" {
++				t.Fatalf("tool content = %s, want image inspected string", got.Raw)
++			}
++			// Claude tool images are relayed in the following user message.
++			if got := gjson.GetBytes(gotBody, "messages.2.role").String(); got != "user" {
++				t.Fatalf("image relay role = %q, want user", got)
++			}
++			part := gjson.GetBytes(gotBody, "messages.2.content.1")
++			if tt.wantTextOnly {
++				if part.Get("type").String() != "text" || part.Get("text").String() != "[image omitted: unsupported by upstream]" || part.Get("image_url").Exists() {
++					t.Fatalf("text-only relay = %s, want omission marker without image", part.Raw)
+ 				}
+-			} else if !toolContent.IsArray() {
+-				t.Fatalf("tool content type = %s, want array; body=%s", toolContent.Type, string(gotBody))
++			} else if part.Get("type").String() != "image_url" || part.Get("image_url.url").String() != "data:image/png;base64,AA==" {
++				t.Fatalf("multimodal relay = %s, want original image", part.Raw)
+ 			}
+ 		})
+ 	}

@@ -14,6 +14,10 @@ Run `gh workflow run fork-update.yml --repo markusjura/CLIProxyAPI -f upstream=l
 
 The image patch limits inline Claude images to 2000 pixels per edge before both streaming and non-streaming requests, including tool-result images. It preserves aspect ratio and leaves smaller images and source history unchanged. PNG/JPEG/GIF/WebP are supported; oversized non-JPEG images become PNG. URL sources are left to the upstream provider. Images above 100 megapixels fail clearly before full decoding. See upstream issue https://github.com/router-for-me/CLIProxyAPI/issues/5539 (closed as not planned).
 
+The alias recovery patch handles a changed Claude OAuth semantic suffix only when the returned alias is valid and its server and keyed tool ID identify exactly one generated alias in the current request. Exact and semantic matches retain precedence; ambiguous semantic matches, colliding tool IDs, and unknown IDs still fail as request-scoped errors. Caller-owned MCP names do not participate in recovery. Debug logs identify recoveries without recording request bodies or credentials. The reported `mcp__select_sight__push_exit_command` failure is reproduced with an explicit test table; the original incident's request table was unavailable, so its intended tool remains unverified.
+
+The v7.3.3 compatibility patch preserves `input-modalities: [text]` when Claude tool images are relayed into OpenAI user messages. It replaces those image parts with omission markers and updates the executor tests to verify the translated message layout for streaming and non-streaming requests. Multimodal and unspecified models retain their images.
+
 To change a patch, create a disposable checkout of the baseline tag, apply the queue, edit and test there, then stage only patch-owned files and export `git diff --cached --binary` back to the corresponding patch file. Keep patches independent where possible. Increment `patch_revision` whenever patches or the build recipe change, and update the baseline after verifying a newer upstream release. A conflict or failed test must be resolved before releasing; never skip a patch to make an update pass.
 
 ## Release and deployment
