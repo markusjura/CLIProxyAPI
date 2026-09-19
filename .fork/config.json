@@ -2,5 +2,5 @@
   "repository": "markusjura/CLIProxyAPI",
   "upstream_repository": "router-for-me/CLIProxyAPI",
   "upstream_tag": "v7.3.3",
-  "patch_revision": 2
+  "patch_revision": 3
 }
