@@ -1,6 +1,6 @@
 # Maintaining our CLIProxyAPI build
 
-This fork owns the patch queue, upstream compatibility tests, and macOS ARM64 and Linux AMD64 release artifacts. Dotfiles owns deployment to the central Proxmox CLIProxyAPI LXC. macOS artifacts remain available for local fallback. The app's CLIProxyAPI project is a workspace for this repository; no automation depends on a conversation.
+This fork owns the patch queue, upstream compatibility tests, and macOS ARM64 and Linux AMD64 release artifacts. Dotfiles owns deployment to the central Proxmox CLIProxyAPI LXC. The app's CLIProxyAPI project is a workspace for this repository; no automation depends on a conversation.
 
 ## Update
 
@@ -28,6 +28,4 @@ Every build tests the same patched source on macOS, builds the macOS ARM64 binar
 
 Deploy a validated release with `/Users/mj/dotfiles/.scripts/homeserver/deploy-cliproxyapi.py --release mj-vUPSTREAM.REVISION`. It obtains `release-linux-amd64.json` from the fork release, checks provenance and both checksums, uploads to `ssh cliproxy`, and replaces the binary through the server's installer with model-discovery verification and rollback. The service owns its configuration and OAuth state in CT 109; deployment never replaces either. Read `dotfiles/docs/cliproxyapi.md` for access, rollback, backups, and client setup. The daily GitHub workflow remains build-and-publish only.
 
-The old `fleet promote-cliproxy`, `fleet sync`, and `fleet maintain --only cliproxyapi` commands update Mac fallback binaries only. They are no longer the primary deployment path. Keep fallback binaries at their last validated version unless a fallback update is explicitly requested.
-
-The dotfiles skill `update-cliproxyapi` routes natural-language update requests here. “Update CLIProxyAPI” runs the full build/reuse, central LXC deployment, and verification workflow. An explicit build-only request stops before promotion.
+The dotfiles skill `update-cliproxyapi` routes natural-language update requests here. “Update CLIProxyAPI” runs the full build/reuse, central LXC deployment, and verification workflow. An explicit build-only request stops before deployment.
