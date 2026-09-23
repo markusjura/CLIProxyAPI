@@ -1,9 +1,9 @@
 diff --git a/internal/runtime/executor/claude_executor_request.go b/internal/runtime/executor/claude_executor_request.go
-index 88554b3..284d471 100644
+index 40704c6..8132df8 100644
 --- a/internal/runtime/executor/claude_executor_request.go
 +++ b/internal/runtime/executor/claude_executor_request.go
-@@ -2155,6 +2155,27 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
- 		return "", false, claudeMCPAliasRestoreError{fmt.Errorf("cannot restore Claude OAuth MCP tool alias %q: semantic suffix matches multiple declared tools", name)}
+@@ -2354,6 +2354,27 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
+ 		}
  	}
  
 +	// A model may drift the semantic suffix while preserving the keyed tool ID.
@@ -31,12 +31,12 @@ index 88554b3..284d471 100644
  }
  
 diff --git a/internal/runtime/executor/claude_executor_request_remap_test.go b/internal/runtime/executor/claude_executor_request_remap_test.go
-index 995ef55..4bfa861 100644
+index 165d5de..cb301c2 100644
 --- a/internal/runtime/executor/claude_executor_request_remap_test.go
 +++ b/internal/runtime/executor/claude_executor_request_remap_test.go
-@@ -745,3 +745,63 @@ func reverseMapKeyFor(m map[string]string, val string) string {
- 	}
- 	return ""
+@@ -830,3 +830,63 @@ func TestReverseRemapOAuthToolNamesHybridPassthroughPrecedenceAndAmbiguity(t *te
+ 		}
+ 	})
  }
 +
 +// The incident alias is reproduced with an explicit table; this does not assert
