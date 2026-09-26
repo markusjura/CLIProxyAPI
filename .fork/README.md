@@ -18,6 +18,8 @@ The alias recovery patch handles a changed Claude OAuth semantic suffix only whe
 
 The relayed-image compatibility patch extends executor coverage for streaming multimodal and unspecified models. Since v7.3.15, upstream itself preserves `input-modalities: [text]` by removing synthetic image relays and recording an omission marker in the tool result; our old implementation is superseded by that fix. The retained patch verifies that multimodal and unspecified models still receive their images in both streaming and non-streaming requests.
 
+The request size patch keeps Claude requests under Anthropic's 32 MiB body limit, which otherwise returns `413 request_too_large`. Long image-heavy Codex threads can reach that limit well before their token count triggers compaction, and every retry then fails. Above a 30 MiB budget, the oldest inline images, including tool-result images, become `[image omitted: request size limit]` text blocks that keep their `cache_control`. Omissions grow in 8 MiB steps, so the cached prompt prefix changes only after another 8 MiB of growth. Requests within the budget are unchanged.
+
 To change a patch, create a disposable checkout of the baseline tag, apply the queue, edit and test there, then stage only patch-owned files and export `git diff --cached --binary` back to the corresponding patch file. Keep patches independent where possible. Increment `patch_revision` whenever patches or the build recipe change, and update the baseline after verifying a newer upstream release. A conflict or failed test must be resolved before releasing; never skip a patch to make an update pass.
 
 ## Release and deployment
