@@ -1,8 +1,8 @@
 diff --git a/internal/runtime/executor/claude_executor_request.go b/internal/runtime/executor/claude_executor_request.go
-index 40704c6..8132df8 100644
+index 40704c6..37d78c1 100644
 --- a/internal/runtime/executor/claude_executor_request.go
 +++ b/internal/runtime/executor/claude_executor_request.go
-@@ -2354,6 +2354,27 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
+@@ -2354,6 +2354,28 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
  		}
  	}
  
@@ -12,17 +12,18 @@ index 40704c6..8132df8 100644
 +	// exactly one generated alias with this server and ID. Passthrough tools never
 +	// participate. Invalid names and ambiguous semantic matches still fail closed.
 +	if validAlias {
++		idOriginal, idMatches := "", 0
 +		for _, entry := range resolver.aliases {
 +			if entry.parts.server == parts.server && entry.parts.toolID == parts.toolID {
-+				matchedOriginal = entry.original
-+				matchCount++
++				idOriginal = entry.original
++				idMatches++
 +			}
 +		}
-+		if matchCount == 1 {
-+			log.Debugf("claude oauth mcp alias: recovered drifted tool name %q as %q via unique request-local tool ID", name, matchedOriginal)
-+			return matchedOriginal, true, nil
++		if idMatches == 1 {
++			log.Debugf("claude oauth mcp alias: recovered drifted tool name %q as %q via unique request-local tool ID", name, idOriginal)
++			return idOriginal, true, nil
 +		}
-+		if matchCount > 1 {
++		if idMatches > 1 {
 +			return "", false, claudeMCPAliasRestoreError{fmt.Errorf("cannot restore Claude OAuth MCP tool alias %q: tool ID matches multiple declared tools", name)}
 +		}
 +	}

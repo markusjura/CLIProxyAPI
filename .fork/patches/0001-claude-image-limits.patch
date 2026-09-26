@@ -1,0 +1,399 @@
+diff --git a/go.mod b/go.mod
+index 52b2643..a9628a1 100644
+--- a/go.mod
++++ b/go.mod
+@@ -32,6 +32,7 @@ require (
+ 	github.com/tidwall/sjson v1.2.5
+ 	github.com/tiktoken-go/tokenizer v0.8.1
+ 	golang.org/x/crypto v0.54.0
++	golang.org/x/image v0.32.0
+ 	golang.org/x/net v0.57.0
+ 	golang.org/x/oauth2 v0.30.0
+ 	golang.org/x/sync v0.22.0
+diff --git a/go.sum b/go.sum
+index 5b69fa6..cc80e1e 100644
+--- a/go.sum
++++ b/go.sum
+@@ -257,6 +257,8 @@ golang.org/x/crypto v0.54.0 h1:YLIA59K4fiNzHzjnZt2tUJQjQtUWfWbeHBqKtk3eScw=
+ golang.org/x/crypto v0.54.0/go.mod h1:KWL8ny2AZdGR2cWmzeHrp2azQPGogOv+HeQaVEXC2dk=
+ golang.org/x/exp v0.0.0-20231006140011-7918f672742d h1:jtJma62tbqLibJ5sFQz8bKtEM8rJBtfilJ2qTU199MI=
+ golang.org/x/exp v0.0.0-20231006140011-7918f672742d/go.mod h1:ldy0pHrwJyGW56pPQzzkH36rKxoZW1tw7ZJpeKx+hdo=
++golang.org/x/image v0.32.0 h1:6lZQWq75h7L5IWNk0r+SCpUJ6tUVd3v4ZHnbRKLkUDQ=
++golang.org/x/image v0.32.0/go.mod h1:/R37rrQmKXtO6tYXAjtDLwQgFLHmhW+V6ayXlxzP2Pc=
+ golang.org/x/net v0.0.0-20210226172049-e18ecbb05110/go.mod h1:m0MpNAwzfU5UDzcl9v0D8zg8gWTRqZa9RBIspLL5mdg=
+ golang.org/x/net v0.0.0-20210423184538-5f58ad60dda6/go.mod h1:OJAsFXCWl8Ukc7SiCT/9KSuxbyM7479/AVlXFRxuMCk=
+ golang.org/x/net v0.57.0 h1:K5+3DljvIuDG9/Jv9rvyMywYNFCQ9RSUY6OOTTkT+tE=
+diff --git a/internal/runtime/executor/claude_executor_execute.go b/internal/runtime/executor/claude_executor_execute.go
+index 14b3d02..540844a 100644
+--- a/internal/runtime/executor/claude_executor_execute.go
++++ b/internal/runtime/executor/claude_executor_execute.go
+@@ -265,6 +265,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
+ 		bodyForUpstream, oauthToolNamesReverseMap = prepareClaudeOAuthToolNamesForUpstream(bodyForUpstream, mcpAliases)
+ 	}
+ 	bodyForUpstream = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, bodyForUpstream, baseModel, helps.APIKeyModelIsCompat(req))
++	bodyForUpstream, err = helps.FitClaudeImages(bodyForUpstream)
++	if err != nil {
++		return resp, err
++	}
+ 	if fp.ApplyCLIIdentity {
+ 		bodyForUpstream, err = applyClaudeCLIIdentity(bodyForUpstream, auth, apiKey, url, claudeSessionID, fp.SynthesizeIdentity)
+ 		if err != nil {
+diff --git a/internal/runtime/executor/claude_executor_stream.go b/internal/runtime/executor/claude_executor_stream.go
+index 8a8e324..7d41e9a 100644
+--- a/internal/runtime/executor/claude_executor_stream.go
++++ b/internal/runtime/executor/claude_executor_stream.go
+@@ -257,6 +257,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
+ 		bodyForUpstream, oauthToolNamesReverseMap = prepareClaudeOAuthToolNamesForUpstream(bodyForUpstream, mcpAliases)
+ 	}
+ 	bodyForUpstream = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, bodyForUpstream, baseModel, helps.APIKeyModelIsCompat(req))
++	bodyForUpstream, err = helps.FitClaudeImages(bodyForUpstream)
++	if err != nil {
++		return nil, err
++	}
+ 	if fp.ApplyCLIIdentity {
+ 		bodyForUpstream, err = applyClaudeCLIIdentity(bodyForUpstream, auth, apiKey, url, claudeSessionID, fp.SynthesizeIdentity)
+ 		if err != nil {
+diff --git a/internal/runtime/executor/helps/claude_images.go b/internal/runtime/executor/helps/claude_images.go
+new file mode 100644
+index 0000000..cca112e
+--- /dev/null
++++ b/internal/runtime/executor/helps/claude_images.go
+@@ -0,0 +1,156 @@
++package helps
++
++import (
++	"bytes"
++	"encoding/base64"
++	"fmt"
++	"image"
++	_ "image/gif"
++	"image/jpeg"
++	"image/png"
++
++	log "github.com/sirupsen/logrus"
++	"github.com/tidwall/gjson"
++	"github.com/tidwall/sjson"
++	"golang.org/x/image/draw"
++	_ "golang.org/x/image/webp"
++)
++
++const (
++	// Claude's per-edge limit for requests with many images. Applying it to every
++	// request keeps history valid before it crosses that image count.
++	claudeImageMaxEdge = 2000
++	// Bounds full decoding of untrusted images. Reading dimensions is cheap.
++	claudeImageMaxPixels = 100_000_000
++	// Anthropic rejects bodies above 32 MiB with 413 request_too_large. The budget
++	// leaves room for fields added later, such as the CLI identity.
++	claudeRequestByteBudget = 30 << 20
++	// Omissions grow in steps so most turns keep the same cached prompt prefix.
++	claudeImageOmissionStep = 8 << 20
++	claudeImageOmittedText  = "[image omitted: request size limit]"
++)
++
++// FitClaudeImages fits inline images in an outgoing Claude request to
++// Anthropic's limits. Images above 2000 px per edge are downscaled. If the body
++// still exceeds the size budget, the oldest images become text markers, since
++// image-heavy threads reach that byte limit long before their token count
++// triggers compaction. JSON outside changed blocks is preserved, including
++// numeric precision, and the input is never mutated.
++func FitClaudeImages(body []byte) ([]byte, error) {
++	for _, img := range claudeInlineImages(body) {
++		source, err := resizeClaudeImage(img.block.Get("source.data").String())
++		if err != nil {
++			return nil, fmt.Errorf("%s: %w", img.path, err)
++		}
++		if source == nil {
++			continue
++		}
++		if body, err = sjson.SetBytes(body, img.path+".source", source); err != nil {
++			return nil, err
++		}
++	}
++	return omitOldestClaudeImages(body)
++}
++
++type claudeInlineImage struct {
++	path  string
++	block gjson.Result
++}
++
++// claudeInlineImages lists base64 image blocks in message order, including
++// images nested in tool results.
++func claudeInlineImages(body []byte) []claudeInlineImage {
++	var images []claudeInlineImage
++	var visit func(blocks gjson.Result, path string)
++	visit = func(blocks gjson.Result, path string) {
++		for i, block := range blocks.Array() {
++			blockPath := fmt.Sprintf("%s.%d", path, i)
++			switch block.Get("type").String() {
++			case "tool_result":
++				visit(block.Get("content"), blockPath+".content")
++			case "image":
++				if block.Get("source.type").String() == "base64" {
++					images = append(images, claudeInlineImage{blockPath, block})
++				}
++			}
++		}
++	}
++	for i, message := range gjson.GetBytes(body, "messages").Array() {
++		visit(message.Get("content"), fmt.Sprintf("messages.%d.content", i))
++	}
++	return images
++}
++
++// resizeClaudeImage returns a downscaled base64 source, or nil when the image
++// already fits. Oversized JPEGs stay JPEG; other formats become PNG.
++func resizeClaudeImage(encoded string) (map[string]string, error) {
++	raw, err := base64.StdEncoding.DecodeString(encoded)
++	if err != nil {
++		return nil, fmt.Errorf("invalid base64 image")
++	}
++	cfg, format, err := image.DecodeConfig(bytes.NewReader(raw))
++	if err != nil {
++		return nil, fmt.Errorf("cannot read image dimensions: %w", err)
++	}
++	if cfg.Width <= claudeImageMaxEdge && cfg.Height <= claudeImageMaxEdge {
++		return nil, nil
++	}
++	if cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width)*int64(cfg.Height) > claudeImageMaxPixels {
++		return nil, fmt.Errorf("image exceeds 100 megapixel resize limit")
++	}
++	src, _, err := image.Decode(bytes.NewReader(raw))
++	if err != nil {
++		return nil, fmt.Errorf("cannot decode image: %w", err)
++	}
++	longest := max(cfg.Width, cfg.Height)
++	width, height := max(1, cfg.Width*claudeImageMaxEdge/longest), max(1, cfg.Height*claudeImageMaxEdge/longest)
++	dst := image.NewNRGBA(image.Rect(0, 0, width, height))
++	draw.ApproxBiLinear.Scale(dst, dst.Bounds(), src, src.Bounds(), draw.Src, nil)
++	var out bytes.Buffer
++	mediaType := "image/png"
++	if format == "jpeg" {
++		mediaType = "image/jpeg"
++		err = jpeg.Encode(&out, dst, &jpeg.Options{Quality: 90})
++	} else {
++		err = png.Encode(&out, dst)
++	}
++	if err != nil {
++		return nil, fmt.Errorf("cannot encode resized image: %w", err)
++	}
++	return map[string]string{"type": "base64", "media_type": mediaType, "data": base64.StdEncoding.EncodeToString(out.Bytes())}, nil
++}
++
++// omitOldestClaudeImages replaces the oldest images with text markers until the
++// body fits the size budget. Markers keep the image's cache_control breakpoint.
++func omitOldestClaudeImages(body []byte) ([]byte, error) {
++	excess := len(body) - claudeRequestByteBudget
++	if excess <= 0 {
++		return body, nil
++	}
++	// Omit whole steps rather than the exact excess. Earlier history does not
++	// change, so the omitted set changes only after another step of growth.
++	target := (excess + claudeImageOmissionStep - 1) / claudeImageOmissionStep * claudeImageOmissionStep
++	// Replace in place on one private copy instead of copying the body per image.
++	out := bytes.Clone(body)
++	opts := &sjson.Options{Optimistic: true, ReplaceInPlace: true}
++	saved, omitted := 0, 0
++	for _, img := range claudeInlineImages(body) {
++		if saved >= target {
++			break
++		}
++		marker, _ := sjson.Set(`{"type":"text"}`, "text", claudeImageOmittedText)
++		if cacheControl := img.block.Get("cache_control"); cacheControl.Exists() {
++			marker, _ = sjson.SetRaw(marker, "cache_control", cacheControl.Raw)
++		}
++		var err error
++		if out, err = sjson.SetRawBytesOptions(out, img.path, []byte(marker), opts); err != nil {
++			return nil, err
++		}
++		saved += len(img.block.Raw) - len(marker)
++		omitted++
++	}
++	if omitted > 0 {
++		log.Infof("claude: omitted %d oldest images to reduce request from %d to %d bytes", omitted, len(body), len(out))
++	}
++	return out, nil
++}
+diff --git a/internal/runtime/executor/helps/claude_images_test.go b/internal/runtime/executor/helps/claude_images_test.go
+new file mode 100644
+index 0000000..c7c00ff
+--- /dev/null
++++ b/internal/runtime/executor/helps/claude_images_test.go
+@@ -0,0 +1,176 @@
++package helps
++
++import (
++	"bytes"
++	"encoding/base64"
++	"encoding/binary"
++	"encoding/json"
++	"hash/crc32"
++	"image"
++	"image/jpeg"
++	"image/png"
++	"strings"
++	"testing"
++
++	"github.com/tidwall/gjson"
++)
++
++func imageBlock(mediaType, data string) map[string]any {
++	return map[string]any{"type": "image", "source": map[string]string{"type": "base64", "media_type": mediaType, "data": data}}
++}
++
++func claudeRequest(t *testing.T, messages ...[]any) []byte {
++	t.Helper()
++	var list []any
++	for _, content := range messages {
++		list = append(list, map[string]any{"role": "user", "content": content})
++	}
++	body, err := json.Marshal(map[string]any{"messages": list, "number": json.Number("9007199254740993")})
++	if err != nil {
++		t.Fatal(err)
++	}
++	return body
++}
++
++func TestFitClaudeImagesResizesOversizedImages(t *testing.T) {
++	for _, format := range []string{"png", "jpeg"} {
++		t.Run(format, func(t *testing.T) {
++			var buf bytes.Buffer
++			source := image.NewRGBA(image.Rect(0, 0, 2500, 1000))
++			var err error
++			if format == "jpeg" {
++				err = jpeg.Encode(&buf, source, nil)
++			} else {
++				err = png.Encode(&buf, source)
++			}
++			if err != nil {
++				t.Fatal(err)
++			}
++			block := imageBlock("image/"+format, base64.StdEncoding.EncodeToString(buf.Bytes()))
++			// Exercise history, nested tool results, and the >20-image trigger.
++			content := []any{map[string]any{"type": "text", "text": "keep me"}}
++			for range 21 {
++				content = append(content, block)
++			}
++			content = append(content, map[string]any{"type": "tool_result", "tool_use_id": "tool", "content": []any{block}})
++			payload := claudeRequest(t, content)
++			original := bytes.Clone(payload)
++			output, err := FitClaudeImages(payload)
++			if err != nil {
++				t.Fatal(err)
++			}
++			if !bytes.Equal(payload, original) {
++				t.Fatal("mutated input")
++			}
++			for _, path := range []string{"messages.0.content.1.source", "messages.0.content.21.source", "messages.0.content.22.content.0.source"} {
++				raw, err := base64.StdEncoding.DecodeString(gjson.GetBytes(output, path+".data").String())
++				if err != nil {
++					t.Fatal(err)
++				}
++				cfg, actualFormat, err := image.DecodeConfig(bytes.NewReader(raw))
++				if err != nil {
++					t.Fatal(err)
++				}
++				if cfg.Width != 2000 || cfg.Height != 800 || actualFormat != format {
++					t.Fatalf("unexpected image: %+v %s", cfg, actualFormat)
++				}
++			}
++			if gjson.GetBytes(output, "messages.0.content.0.text").String() != "keep me" {
++				t.Fatal("lost text")
++			}
++			again, err := FitClaudeImages(output)
++			if err != nil || !bytes.Equal(again, output) {
++				t.Fatal("not idempotent", err)
++			}
++		})
++	}
++}
++
++// paddedPNG encodes a small PNG whose private ancillary chunk pads it to size
++// bytes: large like a screenshot, but within the resize limit.
++func paddedPNG(t *testing.T, size int) string {
++	t.Helper()
++	var buf bytes.Buffer
++	if err := png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 8, 8))); err != nil {
++		t.Fatal(err)
++	}
++	encoded := buf.Bytes()
++	pad := size - len(encoded) - 12
++	chunk := binary.BigEndian.AppendUint32(nil, uint32(pad))
++	chunk = append(chunk, "prVt"...)
++	chunk = append(chunk, make([]byte, pad)...)
++	chunk = binary.BigEndian.AppendUint32(chunk, crc32.ChecksumIEEE(chunk[4:]))
++	const afterIHDR = 33
++	padded := append(append(bytes.Clone(encoded[:afterIHDR]), chunk...), encoded[afterIHDR:]...)
++	return base64.StdEncoding.EncodeToString(padded)
++}
++
++func TestFitClaudeImagesOmitsOldestImagesOverBudget(t *testing.T) {
++	// Each turn carries one 1 MiB image; odd turns nest it in a tool result.
++	data := paddedPNG(t, 3<<18)
++	history := func(turns int) []byte {
++		var messages [][]any
++		for i := range turns {
++			block := imageBlock("image/png", data)
++			if i == 0 {
++				block["cache_control"] = map[string]string{"type": "ephemeral"}
++			}
++			var wrapped any = block
++			if i%2 == 1 {
++				wrapped = map[string]any{"type": "tool_result", "tool_use_id": "tool", "content": []any{block}}
++			}
++			messages = append(messages, []any{map[string]any{"type": "text", "text": "turn"}, wrapped})
++		}
++		return claudeRequest(t, messages...)
++	}
++	fit := func(turns int) []byte {
++		t.Helper()
++		output, err := FitClaudeImages(history(turns))
++		if err != nil {
++			t.Fatal(err)
++		}
++		return output
++	}
++	omitted := func(body []byte) int { return strings.Count(string(body), claudeImageOmittedText) }
++
++	if small := history(29); !bytes.Equal(fit(29), small) {
++		t.Fatal("changed a request within budget")
++	}
++	output := fit(40)
++	if len(output) > claudeRequestByteBudget || !json.Valid(output) {
++		t.Fatalf("invalid or oversized output: %d bytes", len(output))
++	}
++	// 10 MiB excess rounds up to two 8 MiB steps, taken from the oldest images.
++	if got := omitted(output); got != 16 {
++		t.Fatalf("omitted %d images, want 16", got)
++	}
++	if gjson.GetBytes(output, "messages.0.content.1.cache_control.type").String() != "ephemeral" ||
++		gjson.GetBytes(output, "messages.1.content.1.content.0.text").String() != claudeImageOmittedText ||
++		gjson.GetBytes(output, "messages.16.content.1.type").String() != "image" ||
++		gjson.GetBytes(output, "messages.39.content.1.content.0.type").String() != "image" ||
++		gjson.GetBytes(output, "number").Raw != "9007199254740993" {
++		t.Fatal("unexpected replacement")
++	}
++	// Growth within a step keeps the omitted prefix, and with it the prompt cache.
++	if got := omitted(fit(45)); got != 16 {
++		t.Fatalf("omitted %d images after growth within a step, want 16", got)
++	}
++	if got := omitted(fit(47)); got != 24 {
++		t.Fatalf("omitted %d images after crossing a step, want 24", got)
++	}
++}
++
++func TestFitClaudeImagesPassThroughAndErrors(t *testing.T) {
++	for _, payload := range []string{
++		`{"messages":[{"role":"user","content":"hello"}],"number":9007199254740993}`,
++		`{"messages":[{"role":"user","content":[{"type":"image","source":{"type":"url","url":"https://example.com/image.png"}}]}]}`,
++	} {
++		output, err := FitClaudeImages([]byte(payload))
++		if err != nil || string(output) != payload {
++			t.Fatal("changed unrelated payload", err)
++		}
++	}
++	if _, err := FitClaudeImages([]byte(`{"messages":[{"content":[{"type":"image","source":{"type":"base64","data":"invalid!"}}]}]}`)); err == nil {
++		t.Fatal("expected invalid image error")
++	}
++}
