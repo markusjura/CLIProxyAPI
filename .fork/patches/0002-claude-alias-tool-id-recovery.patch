@@ -1,8 +1,8 @@
 diff --git a/internal/runtime/executor/claude_executor_request.go b/internal/runtime/executor/claude_executor_request.go
-index 40704c6..37d78c1 100644
+index 054f1377..71231a55 100644
 --- a/internal/runtime/executor/claude_executor_request.go
 +++ b/internal/runtime/executor/claude_executor_request.go
-@@ -2354,6 +2354,28 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
+@@ -2476,6 +2476,28 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
  		}
  	}
  
@@ -10,7 +10,7 @@ index 40704c6..37d78c1 100644
 +	// IDs are not globally unique: allocation only prevents full-alias collisions.
 +	// Recover only after semantic matching fails, and only when this request has
 +	// exactly one generated alias with this server and ID. Passthrough tools never
-+	// participate. Invalid names and ambiguous semantic matches still fail closed.
++	// participate. Ambiguous matches still fail; unknown names keep the upstream fallback.
 +	if validAlias {
 +		idOriginal, idMatches := "", 0
 +		for _, entry := range resolver.aliases {
@@ -28,16 +28,16 @@ index 40704c6..37d78c1 100644
 +		}
 +	}
 +
- 	return "", false, claudeMCPAliasRestoreError{fmt.Errorf("cannot restore Claude OAuth MCP tool alias %q: no unique request-local match", name)}
+ 	log.Warnf("claude oauth mcp alias: cannot restore tool name %q: no unique request-local match; forwarding it unchanged", name)
+ 	return "", false, nil
  }
- 
 diff --git a/internal/runtime/executor/claude_executor_request_remap_test.go b/internal/runtime/executor/claude_executor_request_remap_test.go
-index 165d5de..cb301c2 100644
+index e4e3bb69..462c3d04 100644
 --- a/internal/runtime/executor/claude_executor_request_remap_test.go
 +++ b/internal/runtime/executor/claude_executor_request_remap_test.go
-@@ -830,3 +830,63 @@ func TestReverseRemapOAuthToolNamesHybridPassthroughPrecedenceAndAmbiguity(t *te
- 		}
- 	})
+@@ -1105,3 +1105,63 @@ func TestReverseRemapOAuthToolNames_UndeclaredToolFailsOpen(t *testing.T) {
+ 		t.Fatalf("restoredLine = %s, want %s forwarded unchanged", string(restoredLine), string(line))
+ 	}
  }
 +
 +// The incident alias is reproduced with an explicit table; this does not assert
@@ -54,16 +54,16 @@ index 165d5de..cb301c2 100644
 +		{"unique ID", alias, map[string]string{"mcp__select_sight__push_exec_command": "exec_command"}, "exec_command", false},
 +		{"repeated server", "mcp__select_sight__select_sight__push_exit_command", map[string]string{"mcp__select_sight__push_exec_command": "exec_command"}, "exec_command", false},
 +		{"ID collision", alias, map[string]string{"mcp__select_sight__push_exec_command": "exec_command", "mcp__select_sight__push_read_file": "read_file"}, "", true},
-+		{"unknown ID", "mcp__select_sight__unknown_exit_command", map[string]string{"mcp__select_sight__push_exec_command": "exec_command"}, "", true},
++		{"unknown ID", "mcp__select_sight__unknown_exit_command", map[string]string{"mcp__select_sight__push_exec_command": "exec_command"}, "mcp__select_sight__unknown_exit_command", false},
 +		{"unknown server", "mcp__other_server__push_exit_command", map[string]string{"mcp__select_sight__push_exec_command": "exec_command"}, "mcp__other_server__push_exit_command", false},
-+		{"invalid suffix", alias + "!", map[string]string{"mcp__select_sight__push_exec_command": "exec_command"}, "", true},
-+		{"missing suffix", "mcp__select_sight__push_", map[string]string{"mcp__select_sight__push_exec_command": "exec_command"}, "", true},
++		{"invalid suffix", alias + "!", map[string]string{"mcp__select_sight__push_exec_command": "exec_command"}, alias + "!", false},
++		{"missing suffix", "mcp__select_sight__push_", map[string]string{"mcp__select_sight__push_exec_command": "exec_command"}, "mcp__select_sight__push_", false},
 +		{"exact takes precedence", alias, map[string]string{alias: "exit_command", "mcp__select_sight__push_exec_command": "exec_command"}, "exit_command", false},
 +		{"semantic takes precedence", alias, map[string]string{"mcp__select_sight__push_exec_command": "exec_command", "mcp__select_sight__apple_exit_command": "exit_command"}, "exit_command", false},
 +		{"ambiguous semantic cannot use ID", alias, map[string]string{"mcp__select_sight__push_exec_command": "exec_command", "mcp__select_sight__apple_exit_command": "exit.one", "mcp__select_sight__banana_exit_command": "exit.two"}, "", true},
 +		{"caller tool exact passthrough", alias, map[string]string{alias: alias, "mcp__select_sight__push_exec_command": "exec_command"}, alias, false},
-+		{"caller tool excluded from recovery", alias, map[string]string{"mcp__select_sight__push_exec_command": "mcp__select_sight__push_exec_command", "mcp__select_sight__apple_read_file": "read_file"}, "", true},
-+		{"another request has no matching ID", alias, map[string]string{"mcp__select_sight__apple_read_file": "read_file"}, "", true},
++		{"caller tool excluded from recovery", alias, map[string]string{"mcp__select_sight__push_exec_command": "mcp__select_sight__push_exec_command", "mcp__select_sight__apple_read_file": "read_file"}, alias, false},
++		{"another request has no matching ID", alias, map[string]string{"mcp__select_sight__apple_read_file": "read_file"}, alias, false},
 +	}
 +	for _, tt := range tests {
 +		t.Run(tt.name, func(t *testing.T) {
