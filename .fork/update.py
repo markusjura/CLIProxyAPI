@@ -62,7 +62,7 @@ def build(upstream, output):
             run('git', 'apply', '--index', str(patch), cwd=source)
         print(f'Testing {upstream} with patch revision {revision}', flush=True)
         run('go', 'test', './internal/runtime/executor/...', './internal/translator/...',
-            './sdk/api/handlers/openai/...', cwd=source)
+            './sdk/api/handlers/...', './internal/access/...', cwd=source)
         binary = source / 'cliproxyapi'
         date = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
         run('go', 'build', '-trimpath',
@@ -129,7 +129,7 @@ def main():
         notes = output / 'notes.md'
         notes.write_text(f"Upstream {descriptor['upstream_tag']} ({descriptor['upstream_commit']}).\n\n"
                          f"Fork source {descriptor['source_commit']}; patch revision {descriptor['build']}.\n\n"
-                         'Executor, translator, and Responses handler tests passed. macOS ARM64 and Linux AMD64 builds. Deployment to the central LXC is a separate operation.\n')
+                         'Executor, translator, API handler, and access tests passed. macOS ARM64 and Linux AMD64 builds. Deployment to the central LXC is a separate operation.\n')
         # Upload as draft, then expose only when all platform archives and descriptors are present.
         run('gh', 'release', 'create', descriptor['release_tag'], str(output / descriptor['asset']),
             str(output / 'release.json'), str(output / 'release-linux-amd64.json'),

@@ -1,0 +1,434 @@
+diff --git a/internal/access/config_access/chatgpt_token.go b/internal/access/config_access/chatgpt_token.go
+new file mode 100644
+index 0000000..44ce617
+--- /dev/null
++++ b/internal/access/config_access/chatgpt_token.go
+@@ -0,0 +1,245 @@
++package configaccess
++
++import (
++	"context"
++	"crypto"
++	"crypto/rsa"
++	"crypto/sha256"
++	"encoding/base64"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"math/big"
++	"net/http"
++	"os"
++	"slices"
++	"strings"
++	"sync"
++	"time"
++
++	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
++	log "github.com/sirupsen/logrus"
++)
++
++const (
++	chatGPTTokenProviderType = "chatgpt-token"
++	chatGPTTokenIssuer       = "https://auth.openai.com"
++	chatGPTTokenAudience     = "https://api.openai.com/v1"
++	chatGPTTokenJWKSURL      = "https://auth.openai.com/.well-known/jwks.json"
++	// chatGPTTokenUserIDsEnv lists the ChatGPT user IDs (comma separated) whose
++	// Sign in with ChatGPT access tokens may use this proxy instead of an API key.
++	chatGPTTokenUserIDsEnv = "CLIPROXY_CHATGPT_USER_IDS"
++	chatGPTTokenClockSkew  = 30 * time.Second
++	chatGPTJWKSRefetchWait = time.Minute
++)
++
++// Codex clients signed in with ChatGPT send their OpenAI access token as the
++// bearer credential. Registering at init keeps this provider independent of
++// config reloads, which only replace the inline API-key provider.
++func init() {
++	userIDs := parseChatGPTUserIDs(os.Getenv(chatGPTTokenUserIDsEnv))
++	if len(userIDs) == 0 {
++		return
++	}
++	keys := &chatGPTJWKS{url: chatGPTTokenJWKSURL, client: &http.Client{Timeout: 10 * time.Second}}
++	sdkaccess.RegisterProvider(chatGPTTokenProviderType, newChatGPTTokenProvider(userIDs, keys, time.Now))
++	log.Infof("chatgpt token access enabled for %d user(s)", len(userIDs))
++}
++
++func parseChatGPTUserIDs(raw string) []string {
++	var ids []string
++	for _, id := range strings.Split(raw, ",") {
++		if id = strings.TrimSpace(id); id != "" && !slices.Contains(ids, id) {
++			ids = append(ids, id)
++		}
++	}
++	return ids
++}
++
++type chatGPTKeySource interface {
++	key(ctx context.Context, kid string) (*rsa.PublicKey, error)
++}
++
++// chatGPTTokenProvider accepts RS256 access tokens issued by OpenAI for an
++// allowed ChatGPT user. Requests without a JWT bearer are left to other providers.
++type chatGPTTokenProvider struct {
++	userIDs []string
++	keys    chatGPTKeySource
++	now     func() time.Time
++}
++
++func newChatGPTTokenProvider(userIDs []string, keys chatGPTKeySource, now func() time.Time) *chatGPTTokenProvider {
++	return &chatGPTTokenProvider{userIDs: userIDs, keys: keys, now: now}
++}
++
++func (p *chatGPTTokenProvider) Identifier() string { return chatGPTTokenProviderType }
++
++type chatGPTTokenClaims struct {
++	Issuer    string          `json:"iss"`
++	Audience  json.RawMessage `json:"aud"`
++	ExpiresAt int64           `json:"exp"`
++	NotBefore int64           `json:"nbf"`
++	Auth      struct {
++		ChatGPTUserID string `json:"chatgpt_user_id"`
++	} `json:"https://api.openai.com/auth"`
++}
++
++func (p *chatGPTTokenProvider) Authenticate(ctx context.Context, r *http.Request) (*sdkaccess.Result, *sdkaccess.AuthError) {
++	token := extractBearerToken(r.Header.Get("Authorization"))
++	parts := strings.Split(token, ".")
++	if len(parts) != 3 {
++		return nil, sdkaccess.NewNotHandledError()
++	}
++	claims, errVerify := p.verify(ctx, parts)
++	if errVerify != nil {
++		log.Debugf("chatgpt token access rejected: %v", errVerify)
++		return nil, sdkaccess.NewInvalidCredentialError()
++	}
++	return &sdkaccess.Result{
++		Provider:  p.Identifier(),
++		Principal: "chatgpt:" + claims.Auth.ChatGPTUserID,
++		Metadata:  map[string]string{"source": "chatgpt-token"},
++	}, nil
++}
++
++func (p *chatGPTTokenProvider) verify(ctx context.Context, parts []string) (*chatGPTTokenClaims, error) {
++	var header struct {
++		Alg string `json:"alg"`
++		Kid string `json:"kid"`
++	}
++	if errHeader := decodeJWTPart(parts[0], &header); errHeader != nil {
++		return nil, fmt.Errorf("header: %w", errHeader)
++	}
++	if header.Alg != "RS256" || header.Kid == "" {
++		return nil, fmt.Errorf("unsupported token algorithm %q", header.Alg)
++	}
++	signature, errSignature := base64.RawURLEncoding.DecodeString(parts[2])
++	if errSignature != nil {
++		return nil, fmt.Errorf("signature: %w", errSignature)
++	}
++	publicKey, errKey := p.keys.key(ctx, header.Kid)
++	if errKey != nil {
++		return nil, errKey
++	}
++	digest := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
++	if errVerify := rsa.VerifyPKCS1v15(publicKey, crypto.SHA256, digest[:], signature); errVerify != nil {
++		return nil, fmt.Errorf("signature: %w", errVerify)
++	}
++
++	var claims chatGPTTokenClaims
++	if errClaims := decodeJWTPart(parts[1], &claims); errClaims != nil {
++		return nil, fmt.Errorf("claims: %w", errClaims)
++	}
++	now := p.now()
++	switch {
++	case claims.Issuer != chatGPTTokenIssuer:
++		return nil, fmt.Errorf("unexpected issuer %q", claims.Issuer)
++	case !audienceContains(claims.Audience, chatGPTTokenAudience):
++		return nil, errors.New("unexpected audience")
++	case claims.ExpiresAt == 0 || now.After(time.Unix(claims.ExpiresAt, 0).Add(chatGPTTokenClockSkew)):
++		return nil, errors.New("token expired")
++	case claims.NotBefore != 0 && now.Add(chatGPTTokenClockSkew).Before(time.Unix(claims.NotBefore, 0)):
++		return nil, errors.New("token not yet valid")
++	case !slices.Contains(p.userIDs, claims.Auth.ChatGPTUserID):
++		return nil, errors.New("user not allowed")
++	}
++	return &claims, nil
++}
++
++func decodeJWTPart(part string, target any) error {
++	raw, errDecode := base64.RawURLEncoding.DecodeString(part)
++	if errDecode != nil {
++		return errDecode
++	}
++	return json.Unmarshal(raw, target)
++}
++
++// audienceContains accepts the JWT audience as either a string or a list.
++func audienceContains(raw json.RawMessage, want string) bool {
++	var single string
++	if json.Unmarshal(raw, &single) == nil {
++		return single == want
++	}
++	var list []string
++	return json.Unmarshal(raw, &list) == nil && slices.Contains(list, want)
++}
++
++// chatGPTJWKS caches OpenAI's signing keys and refetches, at most once per
++// minute, when a token names an unknown key ID after a rotation.
++type chatGPTJWKS struct {
++	url    string
++	client *http.Client
++
++	mu        sync.Mutex
++	keys      map[string]*rsa.PublicKey
++	fetchedAt time.Time
++}
++
++func (s *chatGPTJWKS) key(ctx context.Context, kid string) (*rsa.PublicKey, error) {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	if key := s.keys[kid]; key != nil {
++		return key, nil
++	}
++	if !s.fetchedAt.IsZero() && time.Since(s.fetchedAt) < chatGPTJWKSRefetchWait {
++		return nil, fmt.Errorf("unknown signing key %q", kid)
++	}
++	keys, errFetch := s.fetch(ctx)
++	// Failed fetches also wait, so an OpenAI outage cannot serialize every request behind a timeout.
++	s.fetchedAt = time.Now()
++	if errFetch != nil {
++		log.Warnf("chatgpt token access: fetch signing keys: %v", errFetch)
++		return nil, errFetch
++	}
++	s.keys = keys
++	if key := s.keys[kid]; key != nil {
++		return key, nil
++	}
++	return nil, fmt.Errorf("unknown signing key %q", kid)
++}
++
++func (s *chatGPTJWKS) fetch(ctx context.Context) (map[string]*rsa.PublicKey, error) {
++	req, errRequest := http.NewRequestWithContext(ctx, http.MethodGet, s.url, nil)
++	if errRequest != nil {
++		return nil, errRequest
++	}
++	resp, errDo := s.client.Do(req)
++	if errDo != nil {
++		return nil, errDo
++	}
++	defer func() {
++		if errClose := resp.Body.Close(); errClose != nil {
++			log.Debugf("chatgpt token access: close signing keys response: %v", errClose)
++		}
++	}()
++	if resp.StatusCode != http.StatusOK {
++		return nil, fmt.Errorf("signing keys status %d", resp.StatusCode)
++	}
++	var document struct {
++		Keys []struct {
++			Kid string `json:"kid"`
++			Kty string `json:"kty"`
++			N   string `json:"n"`
++			E   string `json:"e"`
++		} `json:"keys"`
++	}
++	if errDecode := json.NewDecoder(resp.Body).Decode(&document); errDecode != nil {
++		return nil, errDecode
++	}
++	keys := make(map[string]*rsa.PublicKey, len(document.Keys))
++	for _, jwk := range document.Keys {
++		if jwk.Kty != "RSA" || jwk.Kid == "" {
++			continue
++		}
++		n, errN := base64.RawURLEncoding.DecodeString(jwk.N)
++		e, errE := base64.RawURLEncoding.DecodeString(jwk.E)
++		if errN != nil || errE != nil || len(e) == 0 || len(e) > 4 {
++			continue
++		}
++		keys[jwk.Kid] = &rsa.PublicKey{N: new(big.Int).SetBytes(n), E: int(new(big.Int).SetBytes(e).Int64())}
++	}
++	if len(keys) == 0 {
++		return nil, errors.New("no RSA signing keys")
++	}
++	return keys, nil
++}
+diff --git a/internal/access/config_access/chatgpt_token_test.go b/internal/access/config_access/chatgpt_token_test.go
+new file mode 100644
+index 0000000..8fc2457
+--- /dev/null
++++ b/internal/access/config_access/chatgpt_token_test.go
+@@ -0,0 +1,177 @@
++package configaccess
++
++import (
++	"context"
++	"crypto"
++	"crypto/rand"
++	"crypto/rsa"
++	"crypto/sha256"
++	"encoding/base64"
++	"encoding/json"
++	"math/big"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++	"time"
++
++	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
++)
++
++var chatGPTTestNow = time.Unix(1_800_000_000, 0)
++
++func signChatGPTTestToken(t *testing.T, key *rsa.PrivateKey, kid string, claims map[string]any) string {
++	t.Helper()
++	encode := func(value any) string {
++		raw, errMarshal := json.Marshal(value)
++		if errMarshal != nil {
++			t.Fatal(errMarshal)
++		}
++		return base64.RawURLEncoding.EncodeToString(raw)
++	}
++	signed := encode(map[string]string{"alg": "RS256", "kid": kid, "typ": "JWT"}) + "." + encode(claims)
++	digest := sha256.Sum256([]byte(signed))
++	signature, errSign := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest[:])
++	if errSign != nil {
++		t.Fatal(errSign)
++	}
++	return signed + "." + base64.RawURLEncoding.EncodeToString(signature)
++}
++
++func validChatGPTTestClaims() map[string]any {
++	return map[string]any{
++		"iss":                         chatGPTTokenIssuer,
++		"aud":                         []string{chatGPTTokenAudience},
++		"exp":                         chatGPTTestNow.Add(time.Hour).Unix(),
++		"nbf":                         chatGPTTestNow.Add(-time.Minute).Unix(),
++		"https://api.openai.com/auth": map[string]string{"chatgpt_user_id": "user-allowed"},
++	}
++}
++
++type staticChatGPTKeys map[string]*rsa.PublicKey
++
++func (k staticChatGPTKeys) key(_ context.Context, kid string) (*rsa.PublicKey, error) {
++	if key := k[kid]; key != nil {
++		return key, nil
++	}
++	return nil, context.Canceled
++}
++
++func TestChatGPTTokenProviderAuthenticate(t *testing.T) {
++	signingKey, _ := rsa.GenerateKey(rand.Reader, 2048)
++	otherKey, _ := rsa.GenerateKey(rand.Reader, 2048)
++	provider := newChatGPTTokenProvider([]string{"user-allowed"}, staticChatGPTKeys{"k1": &signingKey.PublicKey}, func() time.Time { return chatGPTTestNow })
++
++	with := func(change func(map[string]any)) map[string]any {
++		claims := validChatGPTTestClaims()
++		change(claims)
++		return claims
++	}
++	tests := []struct {
++		name   string
++		header string
++		want   sdkaccess.AuthErrorCode
++	}{
++		{name: "valid", header: "Bearer " + signChatGPTTestToken(t, signingKey, "k1", validChatGPTTestClaims())},
++		{name: "api key bearer is left to other providers", header: "Bearer sk-gateway-key", want: sdkaccess.AuthErrorCodeNotHandled},
++		{name: "missing header", want: sdkaccess.AuthErrorCodeNotHandled},
++		{name: "other user", header: "Bearer " + signChatGPTTestToken(t, signingKey, "k1", with(func(c map[string]any) {
++			c["https://api.openai.com/auth"] = map[string]string{"chatgpt_user_id": "user-other"}
++		})), want: sdkaccess.AuthErrorCodeInvalidCredential},
++		{name: "expired", header: "Bearer " + signChatGPTTestToken(t, signingKey, "k1", with(func(c map[string]any) {
++			c["exp"] = chatGPTTestNow.Add(-time.Minute).Unix()
++		})), want: sdkaccess.AuthErrorCodeInvalidCredential},
++		{name: "wrong issuer", header: "Bearer " + signChatGPTTestToken(t, signingKey, "k1", with(func(c map[string]any) {
++			c["iss"] = "https://attacker.example"
++		})), want: sdkaccess.AuthErrorCodeInvalidCredential},
++		{name: "wrong audience", header: "Bearer " + signChatGPTTestToken(t, signingKey, "k1", with(func(c map[string]any) {
++			c["aud"] = "https://example.com"
++		})), want: sdkaccess.AuthErrorCodeInvalidCredential},
++		{name: "forged signature", header: "Bearer " + signChatGPTTestToken(t, otherKey, "k1", validChatGPTTestClaims()), want: sdkaccess.AuthErrorCodeInvalidCredential},
++		{name: "unknown key", header: "Bearer " + signChatGPTTestToken(t, signingKey, "k2", validChatGPTTestClaims()), want: sdkaccess.AuthErrorCodeInvalidCredential},
++	}
++	for _, test := range tests {
++		t.Run(test.name, func(t *testing.T) {
++			req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
++			if test.header != "" {
++				req.Header.Set("Authorization", test.header)
++			}
++			result, errAuth := provider.Authenticate(context.Background(), req)
++			if test.want == "" {
++				if errAuth != nil || result == nil || result.Principal != "chatgpt:user-allowed" {
++					t.Fatalf("Authenticate() = %+v, %v; want chatgpt:user-allowed", result, errAuth)
++				}
++				return
++			}
++			if !sdkaccess.IsAuthErrorCode(errAuth, test.want) {
++				t.Fatalf("Authenticate() error = %v, want %s", errAuth, test.want)
++			}
++		})
++	}
++}
++
++// The gateway API key keeps working next to the ChatGPT provider, and a
++// ChatGPT token is accepted although the API-key provider rejects it.
++func TestChatGPTTokenProviderWithAPIKeyProvider(t *testing.T) {
++	signingKey, _ := rsa.GenerateKey(rand.Reader, 2048)
++	manager := sdkaccess.NewManager()
++	manager.SetProviders([]sdkaccess.Provider{
++		newChatGPTTokenProvider([]string{"user-allowed"}, staticChatGPTKeys{"k1": &signingKey.PublicKey}, func() time.Time { return chatGPTTestNow }),
++		newProvider("config-inline", []string{"gateway-key"}),
++	})
++
++	tokenRequest := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
++	tokenRequest.Header.Set("Authorization", "Bearer "+signChatGPTTestToken(t, signingKey, "k1", validChatGPTTestClaims()))
++	tokenRequest.Header.Set("ChatGPT-Account-ID", "account")
++	if result, errAuth := manager.Authenticate(context.Background(), tokenRequest); errAuth != nil || result.Provider != chatGPTTokenProviderType {
++		t.Fatalf("token request = %+v, %v", result, errAuth)
++	}
++
++	keyRequest := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
++	keyRequest.Header.Set("Authorization", "Bearer "+signChatGPTTestToken(t, signingKey, "k1", validChatGPTTestClaims()))
++	keyRequest.Header.Set("X-Api-Key", "gateway-key")
++	if result, errAuth := manager.Authenticate(context.Background(), keyRequest); errAuth != nil || result == nil {
++		t.Fatalf("api key request = %+v, %v", result, errAuth)
++	}
++
++	badRequest := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
++	badRequest.Header.Set("X-Api-Key", "wrong")
++	if _, errAuth := manager.Authenticate(context.Background(), badRequest); !sdkaccess.IsAuthErrorCode(errAuth, sdkaccess.AuthErrorCodeInvalidCredential) {
++		t.Fatalf("wrong key error = %v", errAuth)
++	}
++}
++
++func TestChatGPTJWKSRefetchesRotatedKeys(t *testing.T) {
++	first, _ := rsa.GenerateKey(rand.Reader, 2048)
++	second, _ := rsa.GenerateKey(rand.Reader, 2048)
++	published := map[string]*rsa.PublicKey{"k1": &first.PublicKey}
++	fetches := 0
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++		fetches++
++		var keys []map[string]string
++		for kid, key := range published {
++			keys = append(keys, map[string]string{
++				"kid": kid, "kty": "RSA", "alg": "RS256",
++				"n": base64.RawURLEncoding.EncodeToString(key.N.Bytes()),
++				"e": base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.E)).Bytes()),
++			})
++		}
++		_ = json.NewEncoder(w).Encode(map[string]any{"keys": keys})
++	}))
++	defer server.Close()
++	source := &chatGPTJWKS{url: server.URL, client: server.Client()}
++
++	if _, errKey := source.key(context.Background(), "k1"); errKey != nil {
++		t.Fatalf("k1: %v", errKey)
++	}
++	published["k2"] = &second.PublicKey
++	if _, errKey := source.key(context.Background(), "k2"); errKey == nil {
++		t.Fatal("k2 resolved before the refetch interval")
++	}
++	source.fetchedAt = time.Now().Add(-2 * chatGPTJWKSRefetchWait)
++	if key, errKey := source.key(context.Background(), "k2"); errKey != nil || key.N.Cmp(second.N) != 0 {
++		t.Fatalf("rotated key = %v, %v", key, errKey)
++	}
++	if fetches != 2 {
++		t.Fatalf("fetches = %d, want 2", fetches)
++	}
++}

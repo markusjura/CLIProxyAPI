@@ -1,0 +1,250 @@
+diff --git a/sdk/api/handlers/compaction_bridge.go b/sdk/api/handlers/compaction_bridge.go
+new file mode 100644
+index 0000000..666bd3d
+--- /dev/null
++++ b/sdk/api/handlers/compaction_bridge.go
+@@ -0,0 +1,139 @@
++package handlers
++
++import (
++	"context"
++	"crypto/sha256"
++	"errors"
++	"fmt"
++	"os"
++	"strings"
++	"sync"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
++	log "github.com/sirupsen/logrus"
++	"github.com/tidwall/gjson"
++	"github.com/tidwall/sjson"
++)
++
++// compactionBridgeModelEnv names the OpenAI model that reads OpenAI compaction
++// items for other providers. When unset, those items are left unchanged.
++const compactionBridgeModelEnv = "CLIPROXY_COMPACTION_BRIDGE_MODEL"
++
++const compactionBridgePrompt = "Summarize the conversation so far for another assistant that will continue the work. " +
++	"Include the user's goals, decisions, constraints, file paths, commands, findings, and current status. Output only the summary."
++
++// Codex treats compaction items as opaque and replays them to whichever model
++// continues the thread. Claude compactions are proxy capsules that OpenAI cannot
++// read, and OpenAI compactions are encrypted items that only OpenAI can read.
++// Before dispatch, rewrite items the target cannot read into developer context.
++func (h *BaseAPIHandler) bridgeResponsesCompaction(ctx context.Context, entryProtocol string, providers []string, rawJSON []byte) []byte {
++	if entryProtocol != constant.OpenaiResponse || len(providers) == 0 || !helps.HasResponsesCompactionItem(rawJSON) {
++		return rawJSON
++	}
++	targetReadsOpenAI := true
++	for _, provider := range providers {
++		targetReadsOpenAI = targetReadsOpenAI && provider == "codex"
++	}
++	return rewriteResponsesCompaction(rawJSON, targetReadsOpenAI, func(encrypted string) (string, error) {
++		return h.summarizeOpenAICompaction(ctx, encrypted)
++	})
++}
++
++// rewriteResponsesCompaction replaces proxy capsules everywhere, and OpenAI
++// compaction items only for targets that cannot read them. Items that cannot be
++// converted are kept, so the target's own handling applies.
++func rewriteResponsesCompaction(payload []byte, targetReadsOpenAI bool, summarizeOpenAI func(string) (string, error)) []byte {
++	input := gjson.GetBytes(payload, "input")
++	if !input.IsArray() {
++		return payload
++	}
++	items := input.Array()
++	rewritten := make([]string, 0, len(items))
++	changed := false
++	for _, item := range items {
++		encrypted := item.Get("encrypted_content").String()
++		if item.Get("type").String() != "compaction" || encrypted == "" {
++			rewritten = append(rewritten, item.Raw)
++			continue
++		}
++		var summary string
++		var errSummary error
++		switch {
++		case helps.RecognizedAntigravityCompactionCapsule(encrypted):
++			summary, errSummary = helps.UnsealAntigravityCompaction(strings.TrimSpace(encrypted))
++		case targetReadsOpenAI:
++			rewritten = append(rewritten, item.Raw)
++			continue
++		default:
++			summary, errSummary = summarizeOpenAI(encrypted)
++		}
++		if errSummary != nil {
++			log.Warnf("compaction bridge: kept unreadable compaction item: %v", errSummary)
++			rewritten = append(rewritten, item.Raw)
++			continue
++		}
++		message, _ := sjson.Set(`{"type":"message","role":"developer","content":[{"type":"input_text"}]}`, "content.0.text", "Context summary from previous turns:\n"+summary)
++		rewritten = append(rewritten, message)
++		changed = true
++	}
++	if !changed {
++		return payload
++	}
++	out, errSet := sjson.SetRawBytes(payload, "input", []byte("["+strings.Join(rewritten, ",")+"]"))
++	if errSet != nil {
++		return payload
++	}
++	return out
++}
++
++var compactionBridgeSummaries = struct {
++	sync.Mutex
++	entries map[[sha256.Size]byte]string
++}{entries: make(map[[sha256.Size]byte]string)}
++
++const compactionBridgeCacheSize = 256
++
++// summarizeOpenAICompaction asks an OpenAI model to read the encrypted item.
++// Threads replay the same item every turn, so summaries are cached in memory.
++func (h *BaseAPIHandler) summarizeOpenAICompaction(ctx context.Context, encrypted string) (string, error) {
++	model := strings.TrimSpace(os.Getenv(compactionBridgeModelEnv))
++	if model == "" {
++		return "", errors.New(compactionBridgeModelEnv + " is not set")
++	}
++	key := sha256.Sum256([]byte(encrypted))
++	compactionBridgeSummaries.Lock()
++	summary, ok := compactionBridgeSummaries.entries[key]
++	compactionBridgeSummaries.Unlock()
++	if ok {
++		return summary, nil
++	}
++
++	request := []byte(`{"stream":false,"store":false,"reasoning":{"effort":"low"},"instructions":"You summarize conversations accurately and concisely."}`)
++	request, _ = sjson.SetBytes(request, "model", model)
++	request, _ = sjson.SetRawBytes(request, "input", []byte(`[{"type":"compaction"},{"type":"message","role":"user","content":[{"type":"input_text"}]}]`))
++	request, _ = sjson.SetBytes(request, "input.0.encrypted_content", encrypted)
++	request, _ = sjson.SetBytes(request, "input.1.content.0.text", compactionBridgePrompt)
++
++	// Run outside the client's request context: its pinned credential and
++	// websocket state belong to the target provider, not to OpenAI.
++	summaryCtx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	defer context.AfterFunc(ctx, cancel)()
++	body, _, errMsg := h.executeWithAuthManager(summaryCtx, constant.OpenaiResponse, model, request, "", false)
++	if errMsg != nil {
++		return "", fmt.Errorf("summarize with %s: %w", model, errMsg.Error)
++	}
++	summary, errExtract := helps.ExtractAntigravitySummaryText(body)
++	if errExtract != nil {
++		return "", errExtract
++	}
++
++	compactionBridgeSummaries.Lock()
++	if len(compactionBridgeSummaries.entries) >= compactionBridgeCacheSize {
++		clear(compactionBridgeSummaries.entries)
++	}
++	compactionBridgeSummaries.entries[key] = summary
++	compactionBridgeSummaries.Unlock()
++	return summary, nil
++}
+diff --git a/sdk/api/handlers/compaction_bridge_test.go b/sdk/api/handlers/compaction_bridge_test.go
+new file mode 100644
+index 0000000..dd1d76c
+--- /dev/null
++++ b/sdk/api/handlers/compaction_bridge_test.go
+@@ -0,0 +1,75 @@
++package handlers
++
++import (
++	"errors"
++	"testing"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
++	"github.com/tidwall/gjson"
++	"github.com/tidwall/sjson"
++)
++
++func TestRewriteResponsesCompaction(t *testing.T) {
++	capsule, errSeal := helps.SealAntigravityCompaction("claude summary", "opus-5.5")
++	if errSeal != nil {
++		t.Fatal(errSeal)
++	}
++	payload := []byte(`{"model":"m","input":[{"type":"compaction","encrypted_content":""},{"type":"compaction","encrypted_content":"gAAAAnative"},{"type":"message","role":"user","content":"next"}]}`)
++	payload, _ = sjson.SetBytes(payload, "input.0.encrypted_content", capsule)
++
++	var summarized []string
++	summarize := func(encrypted string) (string, error) {
++		summarized = append(summarized, encrypted)
++		return "openai summary", nil
++	}
++	developerText := func(body []byte, index int) string {
++		item := gjson.GetBytes(body, "input."+string(rune('0'+index)))
++		if item.Get("role").String() != "developer" {
++			t.Fatalf("input.%d = %s, want developer message", index, item.Raw)
++		}
++		return item.Get("content.0.text").String()
++	}
++
++	t.Run("claude target reads both through summaries", func(t *testing.T) {
++		summarized = nil
++		out := rewriteResponsesCompaction(payload, false, summarize)
++		if got := developerText(out, 0); got != "Context summary from previous turns:\nclaude summary" {
++			t.Fatalf("capsule text = %q", got)
++		}
++		if got := developerText(out, 1); got != "Context summary from previous turns:\nopenai summary" {
++			t.Fatalf("native text = %q", got)
++		}
++		if len(summarized) != 1 || summarized[0] != "gAAAAnative" {
++			t.Fatalf("summarized = %v", summarized)
++		}
++		if gjson.GetBytes(out, "input.2.content").String() != "next" {
++			t.Fatalf("later input changed: %s", out)
++		}
++	})
++
++	t.Run("openai target keeps its own compaction", func(t *testing.T) {
++		summarized = nil
++		out := rewriteResponsesCompaction(payload, true, summarize)
++		developerText(out, 0)
++		if native := gjson.GetBytes(out, "input.1"); native.Get("type").String() != "compaction" || native.Get("encrypted_content").String() != "gAAAAnative" {
++			t.Fatalf("native item = %s", native.Raw)
++		}
++		if len(summarized) != 0 {
++			t.Fatalf("summarized = %v, want none", summarized)
++		}
++	})
++
++	t.Run("unreadable item is kept", func(t *testing.T) {
++		out := rewriteResponsesCompaction(payload, false, func(string) (string, error) { return "", errors.New("unavailable") })
++		if native := gjson.GetBytes(out, "input.1"); native.Get("encrypted_content").String() != "gAAAAnative" {
++			t.Fatalf("native item = %s", native.Raw)
++		}
++	})
++
++	t.Run("payload without compaction is unchanged", func(t *testing.T) {
++		plain := []byte(`{"input":[{"type":"message","role":"user","content":"hi"}]}`)
++		if out := rewriteResponsesCompaction(plain, false, summarize); string(out) != string(plain) {
++			t.Fatalf("out = %s", out)
++		}
++	})
++}
+diff --git a/sdk/api/handlers/handlers_execution.go b/sdk/api/handlers/handlers_execution.go
+index 16c0f4f..18a0a5f 100644
+--- a/sdk/api/handlers/handlers_execution.go
++++ b/sdk/api/handlers/handlers_execution.go
+@@ -61,6 +61,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
+ 		return nil, nil, errMsg
+ 	}
+ 	providers = adjustExecutionProvidersForEntryProtocol(entryProtocol, providers)
++	rawJSON = h.bridgeResponsesCompaction(ctx, entryProtocol, providers, rawJSON)
+ 	reqMeta := requestExecutionMetadata(ctx)
+ 	if execOptions.Path != "" {
+ 		reqMeta[coreexecutor.RequestPathMetadataKey] = execOptions.Path
+diff --git a/sdk/api/handlers/handlers_stream.go b/sdk/api/handlers/handlers_stream.go
+index 9e63796..58a31db 100644
+--- a/sdk/api/handlers/handlers_stream.go
++++ b/sdk/api/handlers/handlers_stream.go
+@@ -307,6 +307,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
+ 		return nil, nil, errChan
+ 	}
+ 	providers = adjustExecutionProvidersForEntryProtocol(entryProtocol, providers)
++	rawJSON = h.bridgeResponsesCompaction(ctx, entryProtocol, providers, rawJSON)
+ 	reqMeta := requestExecutionMetadata(ctx)
+ 	if execOptions.Path != "" {
+ 		reqMeta[coreexecutor.RequestPathMetadataKey] = execOptions.Path
