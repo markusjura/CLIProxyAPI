@@ -1,9 +1,9 @@
 diff --git a/sdk/api/handlers/compaction_bridge.go b/sdk/api/handlers/compaction_bridge.go
 new file mode 100644
-index 0000000..666bd3d
+index 0000000..dc71bdb
 --- /dev/null
 +++ b/sdk/api/handlers/compaction_bridge.go
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,138 @@
 +package handlers
 +
 +import (
@@ -15,11 +15,10 @@ index 0000000..666bd3d
 +	"strings"
 +	"sync"
 +
++	"github.com/MoeForge/moego/ojson"
 +	"github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 +	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 +	log "github.com/sirupsen/logrus"
-+	"github.com/tidwall/gjson"
-+	"github.com/tidwall/sjson"
 +)
 +
 +// compactionBridgeModelEnv names the OpenAI model that reads OpenAI compaction
@@ -50,7 +49,7 @@ index 0000000..666bd3d
 +// compaction items only for targets that cannot read them. Items that cannot be
 +// converted are kept, so the target's own handling applies.
 +func rewriteResponsesCompaction(payload []byte, targetReadsOpenAI bool, summarizeOpenAI func(string) (string, error)) []byte {
-+	input := gjson.GetBytes(payload, "input")
++	input := ojson.GetBytes(payload, "input")
 +	if !input.IsArray() {
 +		return payload
 +	}
@@ -79,14 +78,14 @@ index 0000000..666bd3d
 +			rewritten = append(rewritten, item.Raw)
 +			continue
 +		}
-+		message, _ := sjson.Set(`{"type":"message","role":"developer","content":[{"type":"input_text"}]}`, "content.0.text", "Context summary from previous turns:\n"+summary)
++		message, _ := ojson.Set(`{"type":"message","role":"developer","content":[{"type":"input_text"}]}`, "content.0.text", "Context summary from previous turns:\n"+summary)
 +		rewritten = append(rewritten, message)
 +		changed = true
 +	}
 +	if !changed {
 +		return payload
 +	}
-+	out, errSet := sjson.SetRawBytes(payload, "input", []byte("["+strings.Join(rewritten, ",")+"]"))
++	out, errSet := ojson.SetRawBytes(payload, "input", []byte("["+strings.Join(rewritten, ",")+"]"))
 +	if errSet != nil {
 +		return payload
 +	}
@@ -116,10 +115,10 @@ index 0000000..666bd3d
 +	}
 +
 +	request := []byte(`{"stream":false,"store":false,"reasoning":{"effort":"low"},"instructions":"You summarize conversations accurately and concisely."}`)
-+	request, _ = sjson.SetBytes(request, "model", model)
-+	request, _ = sjson.SetRawBytes(request, "input", []byte(`[{"type":"compaction"},{"type":"message","role":"user","content":[{"type":"input_text"}]}]`))
-+	request, _ = sjson.SetBytes(request, "input.0.encrypted_content", encrypted)
-+	request, _ = sjson.SetBytes(request, "input.1.content.0.text", compactionBridgePrompt)
++	request, _ = ojson.SetBytes(request, "model", model)
++	request, _ = ojson.SetRawBytes(request, "input", []byte(`[{"type":"compaction"},{"type":"message","role":"user","content":[{"type":"input_text"}]}]`))
++	request, _ = ojson.SetBytes(request, "input.0.encrypted_content", encrypted)
++	request, _ = ojson.SetBytes(request, "input.1.content.0.text", compactionBridgePrompt)
 +
 +	// Run outside the client's request context: its pinned credential and
 +	// websocket state belong to the target provider, not to OpenAI.
@@ -145,19 +144,18 @@ index 0000000..666bd3d
 +}
 diff --git a/sdk/api/handlers/compaction_bridge_test.go b/sdk/api/handlers/compaction_bridge_test.go
 new file mode 100644
-index 0000000..dd1d76c
+index 0000000..339688c
 --- /dev/null
 +++ b/sdk/api/handlers/compaction_bridge_test.go
-@@ -0,0 +1,75 @@
+@@ -0,0 +1,74 @@
 +package handlers
 +
 +import (
 +	"errors"
 +	"testing"
 +
++	"github.com/MoeForge/moego/ojson"
 +	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
-+	"github.com/tidwall/gjson"
-+	"github.com/tidwall/sjson"
 +)
 +
 +func TestRewriteResponsesCompaction(t *testing.T) {
@@ -166,7 +164,7 @@ index 0000000..dd1d76c
 +		t.Fatal(errSeal)
 +	}
 +	payload := []byte(`{"model":"m","input":[{"type":"compaction","encrypted_content":""},{"type":"compaction","encrypted_content":"gAAAAnative"},{"type":"message","role":"user","content":"next"}]}`)
-+	payload, _ = sjson.SetBytes(payload, "input.0.encrypted_content", capsule)
++	payload, _ = ojson.SetBytes(payload, "input.0.encrypted_content", capsule)
 +
 +	var summarized []string
 +	summarize := func(encrypted string) (string, error) {
@@ -174,7 +172,7 @@ index 0000000..dd1d76c
 +		return "openai summary", nil
 +	}
 +	developerText := func(body []byte, index int) string {
-+		item := gjson.GetBytes(body, "input."+string(rune('0'+index)))
++		item := ojson.GetBytes(body, "input."+string(rune('0'+index)))
 +		if item.Get("role").String() != "developer" {
 +			t.Fatalf("input.%d = %s, want developer message", index, item.Raw)
 +		}
@@ -193,7 +191,7 @@ index 0000000..dd1d76c
 +		if len(summarized) != 1 || summarized[0] != "gAAAAnative" {
 +			t.Fatalf("summarized = %v", summarized)
 +		}
-+		if gjson.GetBytes(out, "input.2.content").String() != "next" {
++		if ojson.GetBytes(out, "input.2.content").String() != "next" {
 +			t.Fatalf("later input changed: %s", out)
 +		}
 +	})
@@ -202,7 +200,7 @@ index 0000000..dd1d76c
 +		summarized = nil
 +		out := rewriteResponsesCompaction(payload, true, summarize)
 +		developerText(out, 0)
-+		if native := gjson.GetBytes(out, "input.1"); native.Get("type").String() != "compaction" || native.Get("encrypted_content").String() != "gAAAAnative" {
++		if native := ojson.GetBytes(out, "input.1"); native.Get("type").String() != "compaction" || native.Get("encrypted_content").String() != "gAAAAnative" {
 +			t.Fatalf("native item = %s", native.Raw)
 +		}
 +		if len(summarized) != 0 {
@@ -212,7 +210,7 @@ index 0000000..dd1d76c
 +
 +	t.Run("unreadable item is kept", func(t *testing.T) {
 +		out := rewriteResponsesCompaction(payload, false, func(string) (string, error) { return "", errors.New("unavailable") })
-+		if native := gjson.GetBytes(out, "input.1"); native.Get("encrypted_content").String() != "gAAAAnative" {
++		if native := ojson.GetBytes(out, "input.1"); native.Get("encrypted_content").String() != "gAAAAnative" {
 +			t.Fatalf("native item = %s", native.Raw)
 +		}
 +	})
@@ -225,7 +223,7 @@ index 0000000..dd1d76c
 +	})
 +}
 diff --git a/sdk/api/handlers/handlers_execution.go b/sdk/api/handlers/handlers_execution.go
-index 16c0f4f..18a0a5f 100644
+index dff03be..90dafba 100644
 --- a/sdk/api/handlers/handlers_execution.go
 +++ b/sdk/api/handlers/handlers_execution.go
 @@ -61,6 +61,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
@@ -237,10 +235,10 @@ index 16c0f4f..18a0a5f 100644
  	if execOptions.Path != "" {
  		reqMeta[coreexecutor.RequestPathMetadataKey] = execOptions.Path
 diff --git a/sdk/api/handlers/handlers_stream.go b/sdk/api/handlers/handlers_stream.go
-index 9e63796..58a31db 100644
+index e04fe3b..bd19a93 100644
 --- a/sdk/api/handlers/handlers_stream.go
 +++ b/sdk/api/handlers/handlers_stream.go
-@@ -307,6 +307,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
+@@ -359,6 +359,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
  		return nil, nil, errChan
  	}
  	providers = adjustExecutionProvidersForEntryProtocol(entryProtocol, providers)

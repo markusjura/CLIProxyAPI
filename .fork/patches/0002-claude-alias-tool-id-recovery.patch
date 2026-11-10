@@ -1,8 +1,8 @@
 diff --git a/internal/runtime/executor/claude_executor_request.go b/internal/runtime/executor/claude_executor_request.go
-index 054f1377..71231a55 100644
+index 82bd6c8..4adacc9 100644
 --- a/internal/runtime/executor/claude_executor_request.go
 +++ b/internal/runtime/executor/claude_executor_request.go
-@@ -2476,6 +2476,28 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
+@@ -2736,6 +2736,28 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
  		}
  	}
  
@@ -32,11 +32,11 @@ index 054f1377..71231a55 100644
  	return "", false, nil
  }
 diff --git a/internal/runtime/executor/claude_executor_request_remap_test.go b/internal/runtime/executor/claude_executor_request_remap_test.go
-index e4e3bb69..462c3d04 100644
+index 56fe743..ddb7aa7 100644
 --- a/internal/runtime/executor/claude_executor_request_remap_test.go
 +++ b/internal/runtime/executor/claude_executor_request_remap_test.go
-@@ -1105,3 +1105,63 @@ func TestReverseRemapOAuthToolNames_UndeclaredToolFailsOpen(t *testing.T) {
- 		t.Fatalf("restoredLine = %s, want %s forwarded unchanged", string(restoredLine), string(line))
+@@ -1161,3 +1161,63 @@ func TestReverseRemapWrappedCallerMCPToolStaysAnErrorWhenAmbiguous(t *testing.T)
+ 		t.Fatalf("ambiguous wrapped tool error = %v, want matches multiple declared tools", errReverse)
  	}
  }
 +
@@ -89,10 +89,10 @@ index e4e3bb69..462c3d04 100644
 +					}
 +					continue
 +				}
-+				if got := gjson.GetBytes(restored, path+".name").String(); got != tt.want {
++				if got := ojson.GetBytes(restored, path+".name").String(); got != tt.want {
 +					t.Fatalf("stream=%v name=%q, want %q", stream, got, tt.want)
 +				}
-+				if gjson.GetBytes(restored, path+".input.command").String() != "pwd" {
++				if ojson.GetBytes(restored, path+".input.command").String() != "pwd" {
 +					t.Fatal("tool arguments changed")
 +				}
 +			}

@@ -1,61 +1,61 @@
 diff --git a/go.mod b/go.mod
-index 145d668e..0f3fabb0 100644
+index 3b4b50d..15a8e79 100644
 --- a/go.mod
 +++ b/go.mod
-@@ -32,6 +32,7 @@ require (
- 	github.com/tidwall/sjson v1.2.5
- 	github.com/tiktoken-go/tokenizer v0.8.1
- 	golang.org/x/crypto v0.54.0
-+	golang.org/x/image v0.32.0
- 	golang.org/x/net v0.57.0
- 	golang.org/x/oauth2 v0.30.0
- 	golang.org/x/sync v0.22.0
+@@ -60,6 +60,7 @@ require (
+ 	github.com/wlynxg/anet v0.0.5 // indirect
+ 	go.etcd.io/bbolt v1.5.0 // indirect
+ 	go.uber.org/atomic v1.11.0 // indirect
++	golang.org/x/image v0.32.0 // indirect
+ 	golang.org/x/time v0.14.0 // indirect
+ )
+ 
 diff --git a/go.sum b/go.sum
-index 5b69fa62..cc80e1e6 100644
+index 8873b5c..b36d557 100644
 --- a/go.sum
 +++ b/go.sum
-@@ -257,6 +257,8 @@ golang.org/x/crypto v0.54.0 h1:YLIA59K4fiNzHzjnZt2tUJQjQtUWfWbeHBqKtk3eScw=
- golang.org/x/crypto v0.54.0/go.mod h1:KWL8ny2AZdGR2cWmzeHrp2azQPGogOv+HeQaVEXC2dk=
+@@ -249,6 +249,8 @@ golang.org/x/crypto v0.57.0 h1:3ZVCjf8Ggz7zneR/EHRVx68Ctf+2pmIMP2UFhh9cC6M=
+ golang.org/x/crypto v0.57.0/go.mod h1:Fdz0i5U6CoizGwLda9DttjSk6qlZo25zYNtR+ycvuZA=
  golang.org/x/exp v0.0.0-20231006140011-7918f672742d h1:jtJma62tbqLibJ5sFQz8bKtEM8rJBtfilJ2qTU199MI=
  golang.org/x/exp v0.0.0-20231006140011-7918f672742d/go.mod h1:ldy0pHrwJyGW56pPQzzkH36rKxoZW1tw7ZJpeKx+hdo=
 +golang.org/x/image v0.32.0 h1:6lZQWq75h7L5IWNk0r+SCpUJ6tUVd3v4ZHnbRKLkUDQ=
 +golang.org/x/image v0.32.0/go.mod h1:/R37rrQmKXtO6tYXAjtDLwQgFLHmhW+V6ayXlxzP2Pc=
  golang.org/x/net v0.0.0-20210226172049-e18ecbb05110/go.mod h1:m0MpNAwzfU5UDzcl9v0D8zg8gWTRqZa9RBIspLL5mdg=
  golang.org/x/net v0.0.0-20210423184538-5f58ad60dda6/go.mod h1:OJAsFXCWl8Ukc7SiCT/9KSuxbyM7479/AVlXFRxuMCk=
- golang.org/x/net v0.57.0 h1:K5+3DljvIuDG9/Jv9rvyMywYNFCQ9RSUY6OOTTkT+tE=
+ golang.org/x/net v0.60.0 h1:79p50tfZlm0J9YfoDsSi639qSXNGVwEzOPLCxM2FsYU=
 diff --git a/internal/runtime/executor/claude_executor_execute.go b/internal/runtime/executor/claude_executor_execute.go
-index 3512e984..deadb6f8 100644
+index ed58582..c30748c 100644
 --- a/internal/runtime/executor/claude_executor_execute.go
 +++ b/internal/runtime/executor/claude_executor_execute.go
-@@ -251,6 +251,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
- 	}
- 	extraBetas, bodyForUpstream = extractAndRemoveBetas(bodyForUpstream)
- 	bodyForUpstream = stripPromptCacheOptions(bodyForUpstream)
+@@ -258,6 +258,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
+ 	extraBetas, _ = extractAndRemoveBetasDoc(doc)
+ 	stripPromptCacheOptionsDoc(doc)
+ 	bodyForUpstream := doc.Bytes()
 +	bodyForUpstream, err = helps.FitClaudeImages(bodyForUpstream)
 +	if err != nil {
 +		return resp, err
 +	}
+ 	body = bodyForUpstream
+ 	bodyForTranslation := bodyForUpstream
  	if cchSigning {
- 		bodyForUpstream, err = signAnthropicMessagesBody(bodyForUpstream)
- 		if err != nil {
 diff --git a/internal/runtime/executor/claude_executor_stream.go b/internal/runtime/executor/claude_executor_stream.go
-index 24845743..82038f04 100644
+index 59b1221..a69c995 100644
 --- a/internal/runtime/executor/claude_executor_stream.go
 +++ b/internal/runtime/executor/claude_executor_stream.go
-@@ -243,6 +243,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
- 	}
- 	extraBetas, bodyForUpstream = extractAndRemoveBetas(bodyForUpstream)
- 	bodyForUpstream = stripPromptCacheOptions(bodyForUpstream)
+@@ -252,6 +252,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
+ 	extraBetas, _ = extractAndRemoveBetasDoc(doc)
+ 	stripPromptCacheOptionsDoc(doc)
+ 	bodyForUpstream := doc.Bytes()
 +	bodyForUpstream, err = helps.FitClaudeImages(bodyForUpstream)
 +	if err != nil {
 +		return nil, err
 +	}
+ 	body = bodyForUpstream
+ 	bodyForTranslation := bodyForUpstream
  	if cchSigning {
- 		bodyForUpstream, err = signAnthropicMessagesBody(bodyForUpstream)
- 		if err != nil {
 diff --git a/internal/runtime/executor/claude_images_integration_test.go b/internal/runtime/executor/claude_images_integration_test.go
 new file mode 100644
-index 00000000..78167ee7
+index 0000000..4dad638
 --- /dev/null
 +++ b/internal/runtime/executor/claude_images_integration_test.go
 @@ -0,0 +1,79 @@
@@ -73,11 +73,11 @@ index 00000000..78167ee7
 +	"net/http/httptest"
 +	"testing"
 +
++	"github.com/MoeForge/moego/ojson"
 +	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 +	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 +	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 +	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-+	"github.com/tidwall/gjson"
 +)
 +
 +func TestClaudeExecutorFitsImagesBeforeSigning(t *testing.T) {
@@ -120,7 +120,7 @@ index 00000000..78167ee7
 +			} else if _, err := executor.Execute(context.Background(), auth, req, opts); err != nil {
 +				t.Fatal(err)
 +			}
-+			raw, err := base64.StdEncoding.DecodeString(gjson.GetBytes(seenBody, "messages.0.content.0.source.data").String())
++			raw, err := base64.StdEncoding.DecodeString(ojson.GetBytes(seenBody, "messages.0.content.0.source.data").String())
 +			if err != nil {
 +				t.Fatal(err)
 +			}
@@ -140,10 +140,10 @@ index 00000000..78167ee7
 +}
 diff --git a/internal/runtime/executor/helps/claude_images.go b/internal/runtime/executor/helps/claude_images.go
 new file mode 100644
-index 00000000..cca112e8
+index 0000000..009b25d
 --- /dev/null
 +++ b/internal/runtime/executor/helps/claude_images.go
-@@ -0,0 +1,156 @@
+@@ -0,0 +1,155 @@
 +package helps
 +
 +import (
@@ -155,9 +155,8 @@ index 00000000..cca112e8
 +	"image/jpeg"
 +	"image/png"
 +
++	"github.com/MoeForge/moego/ojson"
 +	log "github.com/sirupsen/logrus"
-+	"github.com/tidwall/gjson"
-+	"github.com/tidwall/sjson"
 +	"golang.org/x/image/draw"
 +	_ "golang.org/x/image/webp"
 +)
@@ -191,7 +190,7 @@ index 00000000..cca112e8
 +		if source == nil {
 +			continue
 +		}
-+		if body, err = sjson.SetBytes(body, img.path+".source", source); err != nil {
++		if body, err = ojson.SetBytes(body, img.path+".source", source); err != nil {
 +			return nil, err
 +		}
 +	}
@@ -200,15 +199,15 @@ index 00000000..cca112e8
 +
 +type claudeInlineImage struct {
 +	path  string
-+	block gjson.Result
++	block ojson.Result
 +}
 +
 +// claudeInlineImages lists base64 image blocks in message order, including
 +// images nested in tool results.
 +func claudeInlineImages(body []byte) []claudeInlineImage {
 +	var images []claudeInlineImage
-+	var visit func(blocks gjson.Result, path string)
-+	visit = func(blocks gjson.Result, path string) {
++	var visit func(blocks ojson.Result, path string)
++	visit = func(blocks ojson.Result, path string) {
 +		for i, block := range blocks.Array() {
 +			blockPath := fmt.Sprintf("%s.%d", path, i)
 +			switch block.Get("type").String() {
@@ -221,7 +220,7 @@ index 00000000..cca112e8
 +			}
 +		}
 +	}
-+	for i, message := range gjson.GetBytes(body, "messages").Array() {
++	for i, message := range ojson.GetBytes(body, "messages").Array() {
 +		visit(message.Get("content"), fmt.Sprintf("messages.%d.content", i))
 +	}
 +	return images
@@ -278,18 +277,18 @@ index 00000000..cca112e8
 +	target := (excess + claudeImageOmissionStep - 1) / claudeImageOmissionStep * claudeImageOmissionStep
 +	// Replace in place on one private copy instead of copying the body per image.
 +	out := bytes.Clone(body)
-+	opts := &sjson.Options{Optimistic: true, ReplaceInPlace: true}
++	opts := &ojson.Options{Optimistic: true, ReplaceInPlace: true}
 +	saved, omitted := 0, 0
 +	for _, img := range claudeInlineImages(body) {
 +		if saved >= target {
 +			break
 +		}
-+		marker, _ := sjson.Set(`{"type":"text"}`, "text", claudeImageOmittedText)
++		marker, _ := ojson.Set(`{"type":"text"}`, "text", claudeImageOmittedText)
 +		if cacheControl := img.block.Get("cache_control"); cacheControl.Exists() {
-+			marker, _ = sjson.SetRaw(marker, "cache_control", cacheControl.Raw)
++			marker, _ = ojson.SetRaw(marker, "cache_control", cacheControl.Raw)
 +		}
 +		var err error
-+		if out, err = sjson.SetRawBytesOptions(out, img.path, []byte(marker), opts); err != nil {
++		if out, err = ojson.SetRawBytesOptions(out, img.path, []byte(marker), opts); err != nil {
 +			return nil, err
 +		}
 +		saved += len(img.block.Raw) - len(marker)
@@ -302,7 +301,7 @@ index 00000000..cca112e8
 +}
 diff --git a/internal/runtime/executor/helps/claude_images_test.go b/internal/runtime/executor/helps/claude_images_test.go
 new file mode 100644
-index 00000000..c7c00fff
+index 0000000..31e1fce
 --- /dev/null
 +++ b/internal/runtime/executor/helps/claude_images_test.go
 @@ -0,0 +1,176 @@
@@ -320,7 +319,7 @@ index 00000000..c7c00fff
 +	"strings"
 +	"testing"
 +
-+	"github.com/tidwall/gjson"
++	"github.com/MoeForge/moego/ojson"
 +)
 +
 +func imageBlock(mediaType, data string) map[string]any {
@@ -371,7 +370,7 @@ index 00000000..c7c00fff
 +				t.Fatal("mutated input")
 +			}
 +			for _, path := range []string{"messages.0.content.1.source", "messages.0.content.21.source", "messages.0.content.22.content.0.source"} {
-+				raw, err := base64.StdEncoding.DecodeString(gjson.GetBytes(output, path+".data").String())
++				raw, err := base64.StdEncoding.DecodeString(ojson.GetBytes(output, path+".data").String())
 +				if err != nil {
 +					t.Fatal(err)
 +				}
@@ -383,7 +382,7 @@ index 00000000..c7c00fff
 +					t.Fatalf("unexpected image: %+v %s", cfg, actualFormat)
 +				}
 +			}
-+			if gjson.GetBytes(output, "messages.0.content.0.text").String() != "keep me" {
++			if ojson.GetBytes(output, "messages.0.content.0.text").String() != "keep me" {
 +				t.Fatal("lost text")
 +			}
 +			again, err := FitClaudeImages(output)
@@ -452,11 +451,11 @@ index 00000000..c7c00fff
 +	if got := omitted(output); got != 16 {
 +		t.Fatalf("omitted %d images, want 16", got)
 +	}
-+	if gjson.GetBytes(output, "messages.0.content.1.cache_control.type").String() != "ephemeral" ||
-+		gjson.GetBytes(output, "messages.1.content.1.content.0.text").String() != claudeImageOmittedText ||
-+		gjson.GetBytes(output, "messages.16.content.1.type").String() != "image" ||
-+		gjson.GetBytes(output, "messages.39.content.1.content.0.type").String() != "image" ||
-+		gjson.GetBytes(output, "number").Raw != "9007199254740993" {
++	if ojson.GetBytes(output, "messages.0.content.1.cache_control.type").String() != "ephemeral" ||
++		ojson.GetBytes(output, "messages.1.content.1.content.0.text").String() != claudeImageOmittedText ||
++		ojson.GetBytes(output, "messages.16.content.1.type").String() != "image" ||
++		ojson.GetBytes(output, "messages.39.content.1.content.0.type").String() != "image" ||
++		ojson.GetBytes(output, "number").Raw != "9007199254740993" {
 +		t.Fatal("unexpected replacement")
 +	}
 +	// Growth within a step keeps the omitted prefix, and with it the prompt cache.
