@@ -1,21 +1,21 @@
 diff --git a/go.mod b/go.mod
-index 3b4b50d..15a8e79 100644
+index e1f1b47..a1033e8 100644
 --- a/go.mod
 +++ b/go.mod
-@@ -60,6 +60,7 @@ require (
+@@ -59,6 +59,7 @@ require (
+ 	github.com/rogpeppe/go-internal v1.15.0 // indirect
  	github.com/wlynxg/anet v0.0.5 // indirect
- 	go.etcd.io/bbolt v1.5.0 // indirect
  	go.uber.org/atomic v1.11.0 // indirect
 +	golang.org/x/image v0.32.0 // indirect
  	golang.org/x/time v0.14.0 // indirect
  )
  
 diff --git a/go.sum b/go.sum
-index 8873b5c..b36d557 100644
+index b8ac579..310998b 100644
 --- a/go.sum
 +++ b/go.sum
-@@ -249,6 +249,8 @@ golang.org/x/crypto v0.57.0 h1:3ZVCjf8Ggz7zneR/EHRVx68Ctf+2pmIMP2UFhh9cC6M=
- golang.org/x/crypto v0.57.0/go.mod h1:Fdz0i5U6CoizGwLda9DttjSk6qlZo25zYNtR+ycvuZA=
+@@ -254,6 +254,8 @@ golang.org/x/crypto v0.58.0 h1:COkYLr4k7nDI4r6QtMML2AfzeIswWHAJthLS6K/M/54=
+ golang.org/x/crypto v0.58.0/go.mod h1:Xh+kl5A+M0gMiWDytH2Hhr5Z7WbNCpv/eB/EFgfSk+w=
  golang.org/x/exp v0.0.0-20231006140011-7918f672742d h1:jtJma62tbqLibJ5sFQz8bKtEM8rJBtfilJ2qTU199MI=
  golang.org/x/exp v0.0.0-20231006140011-7918f672742d/go.mod h1:ldy0pHrwJyGW56pPQzzkH36rKxoZW1tw7ZJpeKx+hdo=
 +golang.org/x/image v0.32.0 h1:6lZQWq75h7L5IWNk0r+SCpUJ6tUVd3v4ZHnbRKLkUDQ=
@@ -24,12 +24,12 @@ index 8873b5c..b36d557 100644
  golang.org/x/net v0.0.0-20210423184538-5f58ad60dda6/go.mod h1:OJAsFXCWl8Ukc7SiCT/9KSuxbyM7479/AVlXFRxuMCk=
  golang.org/x/net v0.60.0 h1:79p50tfZlm0J9YfoDsSi639qSXNGVwEzOPLCxM2FsYU=
 diff --git a/internal/runtime/executor/claude_executor_execute.go b/internal/runtime/executor/claude_executor_execute.go
-index ed58582..c30748c 100644
+index 9390136..0ad0557 100644
 --- a/internal/runtime/executor/claude_executor_execute.go
 +++ b/internal/runtime/executor/claude_executor_execute.go
-@@ -258,6 +258,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
+@@ -261,6 +261,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
+ 	}
  	extraBetas, _ = extractAndRemoveBetasDoc(doc)
- 	stripPromptCacheOptionsDoc(doc)
  	bodyForUpstream := doc.Bytes()
 +	bodyForUpstream, err = helps.FitClaudeImages(bodyForUpstream)
 +	if err != nil {
@@ -37,14 +37,14 @@ index ed58582..c30748c 100644
 +	}
  	body = bodyForUpstream
  	bodyForTranslation := bodyForUpstream
- 	if cchSigning {
+ 	advisorState.FilterUnknownIDsFromFinalBody(bodyForUpstream)
 diff --git a/internal/runtime/executor/claude_executor_stream.go b/internal/runtime/executor/claude_executor_stream.go
-index 59b1221..a69c995 100644
+index cb63d6d..877e8af 100644
 --- a/internal/runtime/executor/claude_executor_stream.go
 +++ b/internal/runtime/executor/claude_executor_stream.go
-@@ -252,6 +252,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
+@@ -255,6 +255,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
+ 	}
  	extraBetas, _ = extractAndRemoveBetasDoc(doc)
- 	stripPromptCacheOptionsDoc(doc)
  	bodyForUpstream := doc.Bytes()
 +	bodyForUpstream, err = helps.FitClaudeImages(bodyForUpstream)
 +	if err != nil {
@@ -52,7 +52,7 @@ index 59b1221..a69c995 100644
 +	}
  	body = bodyForUpstream
  	bodyForTranslation := bodyForUpstream
- 	if cchSigning {
+ 	advisorState.FilterUnknownIDsFromFinalBody(bodyForUpstream)
 diff --git a/internal/runtime/executor/claude_images_integration_test.go b/internal/runtime/executor/claude_images_integration_test.go
 new file mode 100644
 index 0000000..4dad638
